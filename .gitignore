@@ -165,5 +165,5 @@ cython_debug/
 CryCorpusFinal
 logs
 spectrograms
-cnn_best_model.tf
-lstm_best_model.tf
+cnn_best_model
+lstm_best_model
