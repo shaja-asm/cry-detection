@@ -11,7 +11,7 @@ import datetime
 from tensorflow.keras.callbacks import (ModelCheckpoint, ReduceLROnPlateau,
                                         TensorBoard, EarlyStopping)
 from tensorflow.keras.optimizers import Adam
-from kerastuner.tuners import RandomSearch
+from keras_tuner.tuners import RandomSearch
 import scipy.fftpack
 import pathlib
 
@@ -93,11 +93,9 @@ def compute_mfcc(y, sr, n_mfcc=NUM_MFCC):
         f_m_plus = bin[m + 1]    # Right
         
         for k in range(f_m_minus, f_m):
-            denom = bin[m] - bin[m - 1]
-            fbank[m - 1, k] = (k - bin[m - 1]) / denom if denom != 0 else 0
+            fbank[m - 1, k] = (k - bin[m - 1]) / (bin[m] - bin[m - 1])
         for k in range(f_m, f_m_plus):
-            denom = bin[m + 1] - bin[m]
-            fbank[m - 1, k] = (bin[m + 1] - k) / denom if denom != 0 else 0
+            fbank[m - 1, k] = (bin[m + 1] - k) / (bin[m + 1] - bin[m])
         
     filter_banks = np.dot(pow_frames, fbank.T)
     # Numerical stability
@@ -141,7 +139,7 @@ def process_and_save_mfcc(file_paths, label_prefix, save_dir, n_mfcc=NUM_MFCC):
         y, sr = sf.read(file)
         y = y.astype(np.float32)
         # Normalize the audio signal
-        y = y / (np.max(np.abs(y)) + 1e-8)
+        y = y / np.max(np.abs(y))
         mfcc = compute_mfcc(y, sr, n_mfcc=n_mfcc)
         save_path = os.path.join(save_dir, f'{label_prefix}_{idx}.npy')
         save_mfcc_to_disk(mfcc, save_path)
@@ -469,58 +467,39 @@ def evaluate_model(model, X_val, y_val, is_lstm=False):
     print(f'Model saved as {model_name}_cry_detection_model.keras')
 
 
-def convert_and_save_tflite_model(model, model_type, X_train):
-    """Convert the Keras model to TFLite format and save it with quantization."""
+def convert_and_save_tflite_model(model, model_type):
+    """Convert the Keras model to TFLite format and save it."""
     # Create directory for TFLite models
     tflite_models_dir = pathlib.Path("tflite_models")
     tflite_models_dir.mkdir(exist_ok=True, parents=True)
-
-    # Convert to TFLite without quantization (Float32)
+    
+    # Convert to TFLite
     converter = tf.lite.TFLiteConverter.from_keras_model(model)
     
-    # Allow Select TF Ops for LSTM models if necessary
+    # Allow Select TF Ops for both CNN and LSTM models if necessary
+    converter.target_spec.supported_ops = [
+        tf.lite.OpsSet.TFLITE_BUILTINS,
+        tf.lite.OpsSet.SELECT_TF_OPS
+    ]
+    
+    # For LSTM models, disable experimental lowering of tensor list ops
     if model_type == 'lstm':
-        converter.target_spec.supported_ops = [
-            tf.lite.OpsSet.TFLITE_BUILTINS,
-            tf.lite.OpsSet.SELECT_TF_OPS
-        ]
-        # Disable experimental lowering of tensor list ops for LSTM
-        converter.experimental_new_converter = False
-
+        converter._experimental_lower_tensor_list_ops = False
+    
+    # Convert the model
     tflite_model = converter.convert()
+    
+    # Save the model
     tflite_model_file = tflite_models_dir / "cry_detection_model.tflite"
     tflite_model_file.write_bytes(tflite_model)
-    print("Float32 TFLite model conversion successful!")
-
-    # Prepare representative dataset generator
-    def representative_dataset_gen():
-        for input_value in representative_data_gen(X_train, model_type):
-            yield [input_value]
-
-    # Set optimization and representative dataset for quantization
+    
+    # Apply optimizations and convert again
     converter.optimizations = [tf.lite.Optimize.DEFAULT]
-    converter.representative_dataset = representative_dataset_gen
-
-    # Specify supported ops for full integer quantization
-    converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
-
-    # Ensure input and output tensors are quantized to int8
-    converter.inference_input_type = tf.int8
-    converter.inference_output_type = tf.int8
-
-    # Convert the model
     tflite_quant_model = converter.convert()
     tflite_model_quant_file = tflite_models_dir / "cry_detection_model_quant.tflite"
     tflite_model_quant_file.write_bytes(tflite_quant_model)
-    print("Quantized TFLite model conversion successful!")
-
-
-def representative_data_gen(X_train, model_type):
-    """Generator function for representative dataset."""
-    for i in range(len(X_train)):
-        mfcc = load_and_preprocess_mfcc(X_train[i], MAX_LENGTH, is_lstm=(model_type == 'lstm'))
-        input_data = np.expand_dims(mfcc, axis=0)
-        yield input_data.astype(np.float32)
+    
+    print("TFLite conversion successful!")
 
 
 def preprocess_audio(file_path, num_mfcc, max_length, is_lstm):
@@ -528,7 +507,7 @@ def preprocess_audio(file_path, num_mfcc, max_length, is_lstm):
     y, sr = sf.read(file_path)
     y = y.astype(np.float32)
     # Normalize the audio signal
-    y = y / (np.max(np.abs(y)) + 1e-8)
+    y = y / np.max(np.abs(y))
     # Compute MFCCs
     mfcc = compute_mfcc(y, sr, n_mfcc=num_mfcc)
     # Preprocess MFCC (pad/truncate, add channel dimension)
@@ -542,14 +521,9 @@ def predict_tflite(interpreter, input_details, output_details, file_path, num_mf
     
     # Adjust input shape for LSTM and CNN
     if is_lstm:
-        input_data = np.expand_dims(input_data, axis=0)  # Shape: (1, time_steps, num_mfcc)
+        input_data = np.expand_dims(input_data, axis=0).astype(np.float32)  # Shape: (1, time_steps, num_mfcc)
     else:
-        input_data = np.expand_dims(input_data, axis=0)  # Shape: (1, time_steps, num_mfcc, 1)
-    
-    # Quantize input data if necessary
-    if input_details[0]['dtype'] == np.int8:
-        scale, zero_point = input_details[0]['quantization']
-        input_data = (input_data / scale + zero_point).astype(np.int8)
+        input_data = np.expand_dims(input_data, axis=0).astype(np.float32)  # Shape: (1, time_steps, num_mfcc, 1)
     
     # Set the tensor to point to the input data for inference
     interpreter.set_tensor(input_details[0]['index'], input_data)
@@ -560,14 +534,7 @@ def predict_tflite(interpreter, input_details, output_details, file_path, num_mf
     # Get the output prediction
     output_data = interpreter.get_tensor(output_details[0]['index'])
     
-    # Dequantize output data if necessary
-    if output_details[0]['dtype'] == np.int8:
-        scale, zero_point = output_details[0]['quantization']
-        prediction = (output_data - zero_point) * scale
-    else:
-        prediction = output_data
-    
-    return prediction
+    return output_data
 
 
 def process_folder_tflite(interpreter, input_details, output_details, folder_path, num_mfcc, max_length, is_lstm):
@@ -678,7 +645,7 @@ def main():
     evaluate_model(model, X_val, y_val, is_lstm=(MODEL_TYPE == 'lstm'))
     
     # Convert model to TFLite and save
-    convert_and_save_tflite_model(model, MODEL_TYPE, X_train)
+    convert_and_save_tflite_model(model, MODEL_TYPE)
     
     # Perform inference using TFLite model
     tflite_inference(MODEL_TYPE)
