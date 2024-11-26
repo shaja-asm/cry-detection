@@ -467,40 +467,101 @@ def evaluate_model(model, X_val, y_val, is_lstm=False):
     print(f'Model saved as {model_name}_cry_detection_model.keras')
 
 
-def convert_and_save_tflite_model(model, model_type):
-    """Convert the Keras model to TFLite format and save it."""
+# # def convert_and_save_tflite_model(model, model_type):
+#     """Convert the Keras model to TFLite format and save it."""
+#     # Create directory for TFLite models
+#     tflite_models_dir = pathlib.Path("tflite_models")
+#     tflite_models_dir.mkdir(exist_ok=True, parents=True)
+    
+#     # Convert to TFLite
+#     converter = tf.lite.TFLiteConverter.from_keras_model(model)
+    
+#     # Allow Select TF Ops for both CNN and LSTM models if necessary
+#     converter.target_spec.supported_ops = [
+#         tf.lite.OpsSet.TFLITE_BUILTINS,
+#         tf.lite.OpsSet.SELECT_TF_OPS
+#     ]
+    
+#     # For LSTM models, disable experimental lowering of tensor list ops
+#     if model_type == 'lstm':
+#         converter._experimental_lower_tensor_list_ops = False
+    
+#     # Convert the model
+#     tflite_model = converter.convert()
+    
+#     # Save the model
+#     tflite_model_file = tflite_models_dir / "cry_detection_model.tflite"
+#     tflite_model_file.write_bytes(tflite_model)
+    
+#     # Apply optimizations and convert again
+#     converter.optimizations = [tf.lite.Optimize.DEFAULT]
+#     tflite_quant_model = converter.convert()
+#     tflite_model_quant_file = tflite_models_dir / "cry_detection_model_quant.tflite"
+#     tflite_model_quant_file.write_bytes(tflite_quant_model)
+    
+#     print("TFLite conversion successful!")
+
+def convert_and_save_tflite_model(model, model_type, sample_audio_files, num_mfcc, max_length, is_lstm=False):
+    """
+    Convert the Keras model to TFLite format (both standard and quantized) and save it.
+
+    Args:
+        model (tf.keras.Model): Trained Keras model to convert.
+        model_type (str): Type of model ('cnn' or 'lstm').
+        sample_audio_files (list): List of file paths for representative data.
+        num_mfcc (int): Number of MFCC features used in the model.
+        max_length (int): Maximum length of input sequences.
+        is_lstm (bool): Whether the model is an LSTM model.
+    """
     # Create directory for TFLite models
     tflite_models_dir = pathlib.Path("tflite_models")
     tflite_models_dir.mkdir(exist_ok=True, parents=True)
-    
-    # Convert to TFLite
-    converter = tf.lite.TFLiteConverter.from_keras_model(model)
-    
-    # Allow Select TF Ops for both CNN and LSTM models if necessary
-    converter.target_spec.supported_ops = [
-        tf.lite.OpsSet.TFLITE_BUILTINS,
-        tf.lite.OpsSet.SELECT_TF_OPS
-    ]
-    
-    # For LSTM models, disable experimental lowering of tensor list ops
-    if model_type == 'lstm':
-        converter._experimental_lower_tensor_list_ops = False
-    
-    # Convert the model
-    tflite_model = converter.convert()
-    
-    # Save the model
-    tflite_model_file = tflite_models_dir / "cry_detection_model.tflite"
-    tflite_model_file.write_bytes(tflite_model)
-    
-    # Apply optimizations and convert again
-    converter.optimizations = [tf.lite.Optimize.DEFAULT]
-    tflite_quant_model = converter.convert()
-    tflite_model_quant_file = tflite_models_dir / "cry_detection_model_quant.tflite"
-    tflite_model_quant_file.write_bytes(tflite_quant_model)
-    
-    print("TFLite conversion successful!")
 
+    # Define representative dataset generator
+    def representative_dataset():
+        for file_path in sample_audio_files:
+            try:
+                # Load precomputed MFCCs from .npy file
+                mfcc = np.load(file_path)
+
+                # Preprocess to match model input
+                input_data = preprocess_mfcc(mfcc, max_length=499)
+
+                # Add batch dimension
+                input_data = np.expand_dims(input_data, axis=0).astype(np.float32)
+
+                print(f"Representative input shape: {input_data.shape}")
+                yield [input_data]
+            except Exception as e:
+                print(f"Error loading file {file_path}: {e}")
+
+    # Convert the model to standard TFLite with TFL3 identifier
+    try:
+        print("Converting to standard TFLite with TFL3 identifier...")
+        converter = tf.lite.TFLiteConverter.from_keras_model(model)
+        converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS]  # Ensure TFL3 compatibility
+        if is_lstm:
+            converter._experimental_lower_tensor_list_ops = False  # Ensure LSTM compatibility
+
+        tflite_model = converter.convert()
+        tflite_model_file = tflite_models_dir / f"{model_type}_cry_detection_model.tflite"
+        tflite_model_file.write_bytes(tflite_model)
+        print(f"Standard TFLite model with TFL3 identifier saved to {tflite_model_file}")
+    except Exception as e:
+        print(f"Failed to convert standard TFLite model: {e}")
+        return
+
+    # Convert the model to quantized TFLite with TFL3 identifier
+    try:
+        print("Converting to quantized TFLite with TFL3 identifier...")
+        converter.optimizations = [tf.lite.Optimize.DEFAULT]  # Enable optimizations
+        converter.representative_dataset = representative_dataset  # Use representative dataset for quantization
+        tflite_quant_model = converter.convert()
+        tflite_model_quant_file = tflite_models_dir / f"{model_type}_cry_detection_model_quant.tflite"
+        tflite_model_quant_file.write_bytes(tflite_quant_model)
+        print(f"Quantized TFLite model with TFL3 identifier saved to {tflite_model_quant_file}")
+    except Exception as e:
+        print(f"Failed to convert quantized TFLite model: {e}")
 
 def preprocess_audio(file_path, num_mfcc, max_length, is_lstm):
     """Preprocess an audio file for inference."""
@@ -564,7 +625,7 @@ def process_folder_tflite(interpreter, input_details, output_details, folder_pat
 def tflite_inference(model_type):
     """Perform inference using the TFLite model."""
     # Initialize the TFLite interpreter
-    interpreter = tf.lite.Interpreter(model_path="tflite_models/cry_detection_model_quant.tflite")
+    interpreter = tf.lite.Interpreter(model_path="tflite_models/cnn_cry_detection_model_quant.tflite")
     interpreter.allocate_tensors()
     
     # Get input and output tensors
@@ -584,6 +645,71 @@ def tflite_inference(model_type):
     
     print(f"Prediction Accuracy: {accuracy:.2f}%")
 
+
+# # def main():
+#     """Main function to execute the training and inference pipeline."""
+#     # Load audio file paths
+#     cry_files = load_audio_files(CRY_FOLDER)
+#     notcry_files = load_audio_files(NOTCRY_FOLDER)
+    
+#     # Prepare directories for saving MFCCs
+#     mfcc_save_dir = os.path.join(AUDIO_PATH, 'mfccs')
+#     os.makedirs(mfcc_save_dir, exist_ok=True)
+    
+#     # Process and save MFCCs for cry and notcry files
+#     cry_data_paths, cry_labels = process_and_save_mfcc(cry_files, 'cry', mfcc_save_dir, n_mfcc=NUM_MFCC)
+#     notcry_data_paths, notcry_labels = process_and_save_mfcc(notcry_files, 'notcry', mfcc_save_dir, n_mfcc=NUM_MFCC)
+    
+#     # Combine data paths and labels
+#     data_paths = np.array(cry_data_paths + notcry_data_paths)
+#     labels = np.array(cry_labels + notcry_labels)
+    
+#     # Split data
+#     X_train, X_val, y_train, y_val = train_test_split(
+#         data_paths, labels, test_size=0.2, random_state=42
+#     )
+    
+#     # Initialize data generators
+#     train_generator = OnTheFlyDataGenerator(
+#         X_train,
+#         y_train,
+#         batch_size=BATCH_SIZE,
+#         num_mfcc=NUM_MFCC,
+#         max_length=MAX_LENGTH,
+#         shuffle=True,
+#         augment=True,
+#         is_lstm=(MODEL_TYPE == 'lstm'),
+#     )
+    
+#     val_generator = OnTheFlyDataGenerator(
+#         X_val,
+#         y_val,
+#         batch_size=BATCH_SIZE,
+#         num_mfcc=NUM_MFCC,
+#         max_length=MAX_LENGTH,
+#         shuffle=False,
+#         augment=False,
+#         is_lstm=(MODEL_TYPE == 'lstm'),
+#     )
+    
+#     # Build and train model
+#     if MODEL_TYPE == 'cnn':
+#         # Build and train CNN model
+#         model = build_and_train_cnn_model(train_generator, val_generator)
+#     elif MODEL_TYPE == 'lstm':
+#         # Build and train LSTM model
+#         model = build_and_train_lstm_model(train_generator, val_generator)
+#     else:
+#         raise ValueError("Invalid MODEL_TYPE. Choose 'cnn' or 'lstm'.")
+    
+#     # Evaluate model on validation data
+#     evaluate_model(model, X_val, y_val, is_lstm=(MODEL_TYPE == 'lstm'))
+    
+#     # Convert model to TFLite and save
+#     convert_and_save_tflite_model(model, MODEL_TYPE, )
+    
+#     # Perform inference using TFLite model
+#     tflite_inference(MODEL_TYPE)
 
 def main():
     """Main function to execute the training and inference pipeline."""
@@ -608,44 +734,56 @@ def main():
         data_paths, labels, test_size=0.2, random_state=42
     )
     
-    # Initialize data generators
-    train_generator = OnTheFlyDataGenerator(
-        X_train,
-        y_train,
-        batch_size=BATCH_SIZE,
-        num_mfcc=NUM_MFCC,
-        max_length=MAX_LENGTH,
-        shuffle=True,
-        augment=True,
-        is_lstm=(MODEL_TYPE == 'lstm'),
-    )
+    # # Initialize data generators
+    # train_generator = OnTheFlyDataGenerator(
+    #     X_train,
+    #     y_train,
+    #     batch_size=BATCH_SIZE,
+    #     num_mfcc=NUM_MFCC,
+    #     max_length=MAX_LENGTH,
+    #     shuffle=True,
+    #     augment=True,
+    #     is_lstm=(MODEL_TYPE == 'lstm'),
+    # )
     
-    val_generator = OnTheFlyDataGenerator(
-        X_val,
-        y_val,
-        batch_size=BATCH_SIZE,
-        num_mfcc=NUM_MFCC,
-        max_length=MAX_LENGTH,
-        shuffle=False,
-        augment=False,
-        is_lstm=(MODEL_TYPE == 'lstm'),
-    )
+    # val_generator = OnTheFlyDataGenerator(
+    #     X_val,
+    #     y_val,
+    #     batch_size=BATCH_SIZE,
+    #     num_mfcc=NUM_MFCC,
+    #     max_length=MAX_LENGTH,
+    #     shuffle=False,
+    #     augment=False,
+    #     is_lstm=(MODEL_TYPE == 'lstm'),
+    # )
     
-    # Build and train model
-    if MODEL_TYPE == 'cnn':
-        # Build and train CNN model
-        model = build_and_train_cnn_model(train_generator, val_generator)
-    elif MODEL_TYPE == 'lstm':
-        # Build and train LSTM model
-        model = build_and_train_lstm_model(train_generator, val_generator)
-    else:
-        raise ValueError("Invalid MODEL_TYPE. Choose 'cnn' or 'lstm'.")
+    # # Build and train model
+    # if MODEL_TYPE == 'cnn':
+    #     # Build and train CNN model
+    #     model = build_and_train_cnn_model(train_generator, val_generator)
+    # elif MODEL_TYPE == 'lstm':
+    #     # Build and train LSTM model
+    #     model = build_and_train_lstm_model(train_generator, val_generator)
+    # else:
+    #     raise ValueError("Invalid MODEL_TYPE. Choose 'cnn' or 'lstm'.")
     
-    # Evaluate model on validation data
-    evaluate_model(model, X_val, y_val, is_lstm=(MODEL_TYPE == 'lstm'))
+    # # Evaluate model on validation data
+    # evaluate_model(model, X_val, y_val, is_lstm=(MODEL_TYPE == 'lstm'))
+    
+    # Define sample files for quantization
+    # Use a subset of the training files for representative data
+    sample_audio_files = X_train[:20]
+    model = tf.keras.models.load_model('cnn_cry_detection_model.keras')
     
     # Convert model to TFLite and save
-    convert_and_save_tflite_model(model, MODEL_TYPE)
+    convert_and_save_tflite_model(
+        model=model,
+        model_type=MODEL_TYPE,
+        sample_audio_files=sample_audio_files,
+        num_mfcc=NUM_MFCC,
+        max_length=MAX_LENGTH,
+        is_lstm=(MODEL_TYPE == 'lstm')
+    )
     
     # Perform inference using TFLite model
     tflite_inference(MODEL_TYPE)
