@@ -503,7 +503,7 @@ def evaluate_model(model, X_val, y_val, is_lstm=False):
 
 def convert_and_save_tflite_model(model, model_type, sample_audio_files, num_mfcc, max_length, is_lstm=False):
     """
-    Convert the Keras model to TFLite format (both standard and quantized) and save it.
+    Convert the Keras model to a fully quantized TFLite format and save it.
 
     Args:
         model (tf.keras.Model): Trained Keras model to convert.
@@ -525,41 +525,29 @@ def convert_and_save_tflite_model(model, model_type, sample_audio_files, num_mfc
                 mfcc = np.load(file_path)
 
                 # Preprocess to match model input
-                input_data = preprocess_mfcc(mfcc, max_length=499)
+                input_data = preprocess_mfcc(mfcc, max_length=max_length)
 
                 # Add batch dimension
                 input_data = np.expand_dims(input_data, axis=0).astype(np.float32)
-
                 print(f"Representative input shape: {input_data.shape}")
                 yield [input_data]
             except Exception as e:
                 print(f"Error loading file {file_path}: {e}")
 
-    # Convert the model to standard TFLite with TFL3 identifier
+    # Convert the model to fully quantized TFLite
     try:
-        print("Converting to standard TFLite with TFL3 identifier...")
+        print("Converting to fully quantized TFLite model...")
         converter = tf.lite.TFLiteConverter.from_keras_model(model)
-        converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS]  # Ensure TFL3 compatibility
-        if is_lstm:
-            converter._experimental_lower_tensor_list_ops = False  # Ensure LSTM compatibility
-
-        tflite_model = converter.convert()
-        tflite_model_file = tflite_models_dir / f"{model_type}_cry_detection_model.tflite"
-        tflite_model_file.write_bytes(tflite_model)
-        print(f"Standard TFLite model with TFL3 identifier saved to {tflite_model_file}")
-    except Exception as e:
-        print(f"Failed to convert standard TFLite model: {e}")
-        return
-
-    # Convert the model to quantized TFLite with TFL3 identifier
-    try:
-        print("Converting to quantized TFLite with TFL3 identifier...")
         converter.optimizations = [tf.lite.Optimize.DEFAULT]  # Enable optimizations
         converter.representative_dataset = representative_dataset  # Use representative dataset for quantization
+        converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]  # Restrict to int8 ops
+        converter.inference_input_type = tf.int8  # Quantize input tensors to int8
+        converter.inference_output_type = tf.int8  # Quantize output tensors to int8
+
         tflite_quant_model = converter.convert()
         tflite_model_quant_file = tflite_models_dir / f"{model_type}_cry_detection_model_quant.tflite"
         tflite_model_quant_file.write_bytes(tflite_quant_model)
-        print(f"Quantized TFLite model with TFL3 identifier saved to {tflite_model_quant_file}")
+        print(f"Fully quantized TFLite model saved to {tflite_model_quant_file}")
     except Exception as e:
         print(f"Failed to convert quantized TFLite model: {e}")
 
