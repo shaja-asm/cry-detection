@@ -5,6 +5,14 @@ import soundfile as sf
 from sklearn.metrics import accuracy_score, f1_score
 import scipy.fftpack
 import sys
+import shutil  # Added to handle file moving
+
+TF_LITE_TYPE_FLOAT32 = 1
+TF_LITE_TYPE_INT8 = 9
+
+class TfLiteQuantizationParams(ctypes.Structure):
+    _fields_ = [("scale", ctypes.c_float),
+                ("zero_point", ctypes.c_int32)]
 
 
 def load_tflite_c_library(lib_path):
@@ -54,6 +62,15 @@ def define_c_api_functions(lib):
 
     lib.TfLiteTensorCopyToBuffer.restype = ctypes.c_int
     lib.TfLiteTensorCopyToBuffer.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t]
+
+    lib.TfLiteTensorType.restype = ctypes.c_int
+    lib.TfLiteTensorType.argtypes = [ctypes.c_void_p]
+
+    lib.TfLiteTensorQuantizationParams.restype = TfLiteQuantizationParams
+    lib.TfLiteTensorQuantizationParams.argtypes = [ctypes.c_void_p]
+
+    lib.TfLiteTensorByteSize.restype = ctypes.c_size_t
+    lib.TfLiteTensorByteSize.argtypes = [ctypes.c_void_p]
 
 
 def compute_mfcc(y, sr, n_mfcc):
@@ -140,7 +157,7 @@ def preprocess_audio(file_path, num_mfcc, max_length, is_lstm):
     """Preprocess an audio file for inference."""
     y, sr = sf.read(file_path)
     y = y.astype(np.float32)
-    y = y / np.max(np.abs(y))  # Normalize the audio signal
+    y = y / (np.max(np.abs(y)) + 1e-8)  # Normalize the audio signal, avoid division by zero
     mfcc = compute_mfcc(y, sr, n_mfcc=num_mfcc)
     mfcc = preprocess_mfcc(mfcc, max_length, is_lstm)
     return mfcc
@@ -149,13 +166,13 @@ def preprocess_audio(file_path, num_mfcc, max_length, is_lstm):
 def main():
     """Main function to perform inference using the TFLite C API."""
     # Set the audio folder and model type directly in the code
-    audio_folder = '/mnt/d/Datasets/CryCorpusFinal/Test'
+    audio_folder = '/mnt/d/deBarbaroCry/deBarbaroCry/CryCorpusFinal/cry'
     model_type = 'cnn'  # Choose 'cnn' or 'lstm'
 
     NUM_MFCC = 20
     MAX_LENGTH = 499
-    TFLITE_MODEL_PATH = '/home/garfield/cry-detection/tflite_models/cnn_cry_detection_model_quant_non_augmented.tflite'
-    TFLITE_C_LIBRARY_PATH = '/home/garfield/cry-detection/libtensorflowlite_c_2_14_1_amd64.so'
+    TFLITE_MODEL_PATH = '/home/meow/repos/cry-detection/tflite_models/cnn_cry_detection_model_quant_shifted.tflite'
+    TFLITE_C_LIBRARY_PATH = '/home/meow/repos/cry-detection/libtensorflowlite_c_2_14_1_amd64.so'
 
     # Load the TensorFlow Lite C library
     lib = load_tflite_c_library(TFLITE_C_LIBRARY_PATH)
@@ -196,23 +213,60 @@ def main():
         print('Failed to get input tensor')
         sys.exit(1)
 
+    # Get input tensor data type and quantization parameters
+    input_dtype = lib.TfLiteTensorType(input_tensor)
+    input_quant_params = lib.TfLiteTensorQuantizationParams(input_tensor)
+    input_scale = input_quant_params.scale
+    input_zero_point = input_quant_params.zero_point
+
+    # Get output tensor
+    output_index = 0  # Assuming the model has a single output
+    output_tensor = lib.TfLiteInterpreterGetOutputTensor(interpreter, output_index)
+    if not output_tensor:
+        print('Failed to get output tensor')
+        sys.exit(1)
+
+    # Get output tensor data type and quantization parameters
+    output_dtype = lib.TfLiteTensorType(output_tensor)
+    output_quant_params = lib.TfLiteTensorQuantizationParams(output_tensor)
+    output_scale = output_quant_params.scale
+    output_zero_point = output_quant_params.zero_point
+
     # Prepare lists to store predictions and ground truth labels
     predictions = []
     ground_truths = []
 
     is_lstm_model = model_type == 'lstm'
 
+    # Create 'verified' subfolder if it doesn't exist
+    verified_folder = os.path.join(audio_folder, 'verified')
+    if not os.path.exists(verified_folder):
+        os.makedirs(verified_folder)
+
     for file_name in os.listdir(audio_folder):
         if file_name.endswith('.wav'):
             file_path = os.path.join(audio_folder, file_name)
+            # Skip if it's already in the 'verified' folder
+            if os.path.dirname(file_path) == verified_folder:
+                continue
+
             # Preprocess the audio file
             input_data = preprocess_audio(file_path, NUM_MFCC, MAX_LENGTH, is_lstm_model)
-
+            
             # Adjust input shape for LSTM and CNN
             if is_lstm_model:
-                input_data = np.expand_dims(input_data, axis=0).astype(np.float32)
+                input_data = np.expand_dims(input_data, axis=0)
             else:
-                input_data = np.expand_dims(input_data, axis=0).astype(np.float32)
+                input_data = np.expand_dims(input_data, axis=0)
+
+            # Quantize the input data if the model expects INT8 input
+            if input_dtype == TF_LITE_TYPE_INT8:
+                input_data = input_data / input_scale + input_zero_point
+                input_data = np.round(input_data).astype(np.int8)
+            elif input_dtype == TF_LITE_TYPE_FLOAT32:
+                input_data = input_data.astype(np.float32)
+            else:
+                raise ValueError(f"Unsupported input tensor data type: {input_dtype}")
 
             input_data_size = input_data.nbytes
 
@@ -232,15 +286,17 @@ def main():
                 print(f'Failed to invoke interpreter for file {file_name}')
                 continue
 
-            # Get output tensor
-            output_index = 0  # Assuming the model has a single output
-            output_tensor = lib.TfLiteInterpreterGetOutputTensor(interpreter, output_index)
-            if not output_tensor:
-                print(f'Failed to get output tensor for file {file_name}')
-                continue
+            # Get output tensor byte size
+            output_size = lib.TfLiteTensorByteSize(output_tensor)
 
-            # Get output data
-            output_data = np.zeros((1,), dtype=np.float32)
+            # Allocate buffer for output data
+            if output_dtype == TF_LITE_TYPE_INT8:
+                output_data = np.empty(output_size, dtype=np.int8)
+            elif output_dtype == TF_LITE_TYPE_FLOAT32:
+                output_data = np.empty(output_size // ctypes.sizeof(ctypes.c_float), dtype=np.float32)
+            else:
+                raise ValueError(f"Unsupported output tensor data type: {output_dtype}")
+
             output_data_size = output_data.nbytes
 
             # Copy output data from the tensor
@@ -252,6 +308,14 @@ def main():
             if status != 0:
                 print(f'Failed to copy output data for file {file_name}')
                 continue
+
+            # Dequantize output data if necessary
+            if output_dtype == TF_LITE_TYPE_INT8:
+                output_data = (output_data.astype(np.float32) - output_zero_point) * output_scale
+            elif output_dtype == TF_LITE_TYPE_FLOAT32:
+                output_data = output_data.astype(np.float32)
+            else:
+                raise ValueError(f"Unsupported output tensor data type: {output_dtype}")
 
             # Get the prediction
             prediction = output_data[0]
@@ -268,11 +332,21 @@ def main():
             ground_truths.append(ground_truth)
 
             # Print the prediction
-            prediction_label = 'Cry' if prediction > 0.5 else 'Not Cry'
+            prediction_label = 'Cry' if prediction > 0.99 else 'Not Cry'
             print(f"File: {file_name}, Prediction: {prediction_label}, Prediction fraction: {prediction}")
 
+            # Move file into 'verified' subfolder if prediction < 0.2
+            if prediction > 0.99:
+                destination_path = os.path.join(verified_folder, file_name)
+                try:
+                    shutil.move(file_path, destination_path)
+                    print(f"Moved file {file_name} to 'verified' folder.")
+                except Exception as e:
+                    print(f"Failed to move file {file_name}: {e}")
+                
+
     # Compute metrics
-    predictions_binary = [1 if p > 0.5 else 0 for p in predictions]
+    predictions_binary = [1 if p > 0.99 else 0 for p in predictions]
 
     accuracy = accuracy_score(ground_truths, predictions_binary)
     f1 = f1_score(ground_truths, predictions_binary)
