@@ -149,12 +149,12 @@ def preprocess_audio(file_path, num_mfcc, max_length, is_lstm):
 def main():
     """Main function to perform inference using the TFLite C API."""
     # Set the audio folder and model type directly in the code
-    audio_folder = '/home/garfield/CryCorpusFinal/Test_augmented'
+    audio_folder = '/mnt/d/Datasets/CryCorpusFinal/Test'
     model_type = 'cnn'  # Choose 'cnn' or 'lstm'
 
     NUM_MFCC = 20
     MAX_LENGTH = 499
-    TFLITE_MODEL_PATH = '/home/garfield/cry-detection/tflite_models/cnn_cry_detection_model_quant.tflite'
+    TFLITE_MODEL_PATH = '/home/garfield/cry-detection/tflite_models/cnn_cry_detection_model_quant_non_augmented.tflite'
     TFLITE_C_LIBRARY_PATH = '/home/garfield/cry-detection/libtensorflowlite_c_2_14_1_amd64.so'
 
     # Load the TensorFlow Lite C library

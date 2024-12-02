@@ -17,7 +17,7 @@ import pathlib
 
 
 # Constants
-AUDIO_PATH = '/home/garfield/CryCorpusFinal'
+AUDIO_PATH = '/mnt/d/Datasets/CryCorpusFinal'
 CRY_FOLDER = os.path.join(AUDIO_PATH, 'cry_augmented')
 NOTCRY_FOLDER = os.path.join(AUDIO_PATH, 'notcry_augmented')
 NUM_MFCC = 20  # Number of MFCC coefficients to extract
@@ -254,7 +254,7 @@ def build_cnn_model(hp):
     model.add(Flatten())
     model.add(
         Dense(
-            units=hp.Int('dense_units', min_value=64, max_value=128, step=64),
+            units=128,
             activation='relu',
             kernel_regularizer=l2_regularizer,
         )
@@ -396,8 +396,8 @@ def build_and_train_cnn_model(train_generator, val_generator):
         objective='val_accuracy',
         max_trials=30,
         executions_per_trial=1,
-        directory='hyperparam_tuning',
-        project_name='cnn_tuning',
+        directory='hyperparam_tuning_new',
+        project_name='cnn_tuning_new',
     )
     
     tuner.search(
@@ -454,7 +454,7 @@ def evaluate_model(model, X_val, y_val, is_lstm=False):
     X_val_data, y_true = load_validation_data(X_val, y_val, NUM_MFCC, MAX_LENGTH, is_lstm)
     # Make predictions
     y_pred = model.predict(X_val_data)
-    y_pred = (y_pred > 0.5).astype(int)
+    y_pred = (y_pred > 0.65).astype(int)
     # Calculate accuracy and F1 score
     accuracy = accuracy_score(y_true, y_pred)
     f1 = f1_score(y_true, y_pred)
@@ -545,7 +545,7 @@ def convert_and_save_tflite_model(model, model_type, sample_audio_files, num_mfc
         converter.inference_output_type = tf.int8  # Quantize output tensors to int8
 
         tflite_quant_model = converter.convert()
-        tflite_model_quant_file = tflite_models_dir / f"{model_type}_cry_detection_model_quant.tflite"
+        tflite_model_quant_file = tflite_models_dir / f"{model_type}_cry_detection_model_quant_shifted.tflite"
         tflite_model_quant_file.write_bytes(tflite_quant_model)
         print(f"Fully quantized TFLite model saved to {tflite_model_quant_file}")
     except Exception as e:
@@ -574,6 +574,16 @@ def predict_tflite(interpreter, input_details, output_details, file_path, num_mf
     else:
         input_data = np.expand_dims(input_data, axis=0).astype(np.float32)  # Shape: (1, time_steps, num_mfcc, 1)
     
+    # Get input quantization parameters
+    input_scale, input_zero_point = input_details[0]['quantization']
+    
+    # Quantize the input data if the model expects INT8 input
+    if input_details[0]['dtype'] == np.int8:
+        input_data = input_data / input_scale + input_zero_point
+        input_data = np.round(input_data).astype(np.int8)
+    else:
+        input_data = input_data.astype(input_details[0]['dtype'])
+    
     # Set the tensor to point to the input data for inference
     interpreter.set_tensor(input_details[0]['index'], input_data)
     
@@ -582,6 +592,11 @@ def predict_tflite(interpreter, input_details, output_details, file_path, num_mf
     
     # Get the output prediction
     output_data = interpreter.get_tensor(output_details[0]['index'])
+    
+    # Dequantize output if necessary
+    output_scale, output_zero_point = output_details[0]['quantization']
+    if output_details[0]['dtype'] == np.int8:
+        output_data = (output_data.astype(np.float32) - output_zero_point) * output_scale
     
     return output_data
 
@@ -596,7 +611,14 @@ def process_folder_tflite(interpreter, input_details, output_details, folder_pat
         if file_name.endswith('.wav'):
             file_path = os.path.join(folder_path, file_name)
             prediction = predict_tflite(interpreter, input_details, output_details, file_path, num_mfcc, max_length, is_lstm)
-            prediction_label = 'Cry' if prediction > 0.5 else 'Not Cry'
+            
+            # Since the output might be quantized, ensure it's converted to float32
+            if isinstance(prediction, np.ndarray) and prediction.dtype != np.float32:
+                prediction = prediction.astype(np.float32)
+            
+            # Assuming binary classification with sigmoid activation
+            prediction_prob = prediction[0][0]
+            prediction_label = 'Cry' if prediction_prob > 0.5 else 'Not Cry'
             results.append((file_name, prediction_label))
             ground_truth = 'Cry' if '_cry.wav' in file_name else 'Not Cry'
 
@@ -613,7 +635,7 @@ def process_folder_tflite(interpreter, input_details, output_details, folder_pat
 def tflite_inference(model_type):
     """Perform inference using the TFLite model."""
     # Initialize the TFLite interpreter
-    interpreter = tf.lite.Interpreter(model_path="tflite_models/cnn_cry_detection_model_quant.tflite")
+    interpreter = tf.lite.Interpreter(model_path=f"tflite_models/{model_type}_cry_detection_model_quant_shifted.tflite")
     interpreter.allocate_tensors()
     
     # Get input and output tensors
@@ -632,6 +654,7 @@ def tflite_inference(model_type):
         print(f"File: {file_name}, Prediction: {prediction_label}")
     
     print(f"Prediction Accuracy: {accuracy:.2f}%")
+
 
 
 # # def main():
@@ -722,30 +745,30 @@ def main():
         data_paths, labels, test_size=0.2, random_state=42
     )
     
-    # # Initialize data generators
-    # train_generator = OnTheFlyDataGenerator(
-    #     X_train,
-    #     y_train,
-    #     batch_size=BATCH_SIZE,
-    #     num_mfcc=NUM_MFCC,
-    #     max_length=MAX_LENGTH,
-    #     shuffle=True,
-    #     augment=True,
-    #     is_lstm=(MODEL_TYPE == 'lstm'),
-    # )
+    # Initialize data generators
+    train_generator = OnTheFlyDataGenerator(
+        X_train,
+        y_train,
+        batch_size=BATCH_SIZE,
+        num_mfcc=NUM_MFCC,
+        max_length=MAX_LENGTH,
+        shuffle=True,
+        augment=True,
+        is_lstm=(MODEL_TYPE == 'lstm'),
+    )
     
-    # val_generator = OnTheFlyDataGenerator(
-    #     X_val,
-    #     y_val,
-    #     batch_size=BATCH_SIZE,
-    #     num_mfcc=NUM_MFCC,
-    #     max_length=MAX_LENGTH,
-    #     shuffle=False,
-    #     augment=False,
-    #     is_lstm=(MODEL_TYPE == 'lstm'),
-    # )
+    val_generator = OnTheFlyDataGenerator(
+        X_val,
+        y_val,
+        batch_size=BATCH_SIZE,
+        num_mfcc=NUM_MFCC,
+        max_length=MAX_LENGTH,
+        shuffle=False,
+        augment=False,
+        is_lstm=(MODEL_TYPE == 'lstm'),
+    )
     
-    # # Build and train model
+    # Build and train model
     # if MODEL_TYPE == 'cnn':
     #     # Build and train CNN model
     #     model = build_and_train_cnn_model(train_generator, val_generator)
