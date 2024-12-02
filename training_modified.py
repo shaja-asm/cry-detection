@@ -7,6 +7,7 @@ from tensorflow.keras.layers import (Conv2D, MaxPooling2D, Flatten, Dense,
                                      Dropout, BatchNormalization, LSTM)
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, f1_score
+from sklearn.utils.class_weight import compute_class_weight
 import datetime
 from tensorflow.keras.callbacks import (ModelCheckpoint, ReduceLROnPlateau,
                                         TensorBoard, EarlyStopping)
@@ -17,9 +18,9 @@ import pathlib
 
 
 # Constants
-AUDIO_PATH = '/home/garfield/CryCorpusFinal'
-CRY_FOLDER = os.path.join(AUDIO_PATH, 'cry_augmented')
-NOTCRY_FOLDER = os.path.join(AUDIO_PATH, 'notcry_augmented')
+AUDIO_PATH = '/mnt/d/deBarbaroCry/deBarbaroCry/CryCorpusNew'
+CRY_FOLDER = os.path.join(AUDIO_PATH, 'cry')
+NOTCRY_FOLDER = os.path.join(AUDIO_PATH, 'notcry')
 NUM_MFCC = 20  # Number of MFCC coefficients to extract
 BATCH_SIZE = 32
 EPOCHS = 50
@@ -159,7 +160,7 @@ def load_and_preprocess_mfcc(file_path, max_length, is_lstm=False):
 class OnTheFlyDataGenerator(tf.keras.utils.Sequence):
     """Data generator for loading and processing data on the fly."""
     def __init__(
-        self, file_paths, labels, batch_size, num_mfcc, max_length, shuffle=True, augment=False, is_lstm=False
+        self, file_paths, labels, batch_size, num_mfcc, max_length, shuffle=True, augment=False, is_lstm=False, class_weights=None
     ):
         self.file_paths = file_paths
         self.labels = labels
@@ -169,6 +170,7 @@ class OnTheFlyDataGenerator(tf.keras.utils.Sequence):
         self.shuffle = shuffle
         self.augment = augment
         self.is_lstm = is_lstm
+        self.class_weights = class_weights  # Add class_weights
         self.indices = np.arange(len(self.file_paths))
         self.on_epoch_end()
 
@@ -182,8 +184,8 @@ class OnTheFlyDataGenerator(tf.keras.utils.Sequence):
         batch_file_paths = [self.file_paths[i] for i in batch_indices]
         batch_labels = [self.labels[i] for i in batch_indices]
 
-        X, y = self.__data_generation(batch_file_paths, batch_labels)
-        return X, y
+        X, y, sample_weights = self.__data_generation(batch_file_paths, batch_labels)
+        return X, y, sample_weights  # Return sample_weights
 
     def on_epoch_end(self):
         if self.shuffle:
@@ -192,6 +194,7 @@ class OnTheFlyDataGenerator(tf.keras.utils.Sequence):
     def __data_generation(self, batch_file_paths, batch_labels):
         X = []
         y = []
+        sample_weights = []  # Initialize sample_weights
 
         for i, file_path in enumerate(batch_file_paths):
             mfcc = load_and_preprocess_mfcc(file_path, self.max_length, self.is_lstm)
@@ -200,11 +203,20 @@ class OnTheFlyDataGenerator(tf.keras.utils.Sequence):
                 mfcc = self._augment_mfcc(mfcc)
 
             X.append(mfcc)
-            y.append(batch_labels[i])
+            y_label = batch_labels[i]
+            y.append(y_label)
+
+            # Assign sample weight based on the class
+            if self.class_weights:
+                sample_weight = self.class_weights[y_label]
+                sample_weights.append(sample_weight)
+            else:
+                sample_weights.append(1.0)  # Default weight
 
         X = np.array(X)
         y = np.array(y)
-        return X, y
+        sample_weights = np.array(sample_weights)
+        return X, y, sample_weights
 
     def _augment_mfcc(self, mfcc):
         noise_factor = 0.005
@@ -254,7 +266,7 @@ def build_cnn_model(hp):
     model.add(Flatten())
     model.add(
         Dense(
-            units=hp.Int('dense_units', min_value=64, max_value=128, step=64),
+            units=128,
             activation='relu',
             kernel_regularizer=l2_regularizer,
         )
@@ -267,7 +279,7 @@ def build_cnn_model(hp):
             'learning_rate', min_value=1e-5, max_value=1e-3, sampling='LOG'
         )
     )
-    optimizer = tf.keras.optimizers.Adam(clipnorm=1.0)  # Gradient clipping
+    # optimizer = tf.keras.optimizers.Adam(clipnorm=1.0)  # Gradient clipping
     model.compile(
         optimizer=optimizer,
         loss='binary_crossentropy',
@@ -376,7 +388,8 @@ def train_model_with_scheduler(model, model_name, train_generator, val_generator
         monitor='val_loss', patience=45, restore_best_weights=True
     )
 
-    history = model.fit(train_generator,
+    history = model.fit(
+        train_generator,
         epochs=EPOCHS,
         validation_data=val_generator,
         callbacks=[
@@ -396,8 +409,8 @@ def build_and_train_cnn_model(train_generator, val_generator):
         objective='val_accuracy',
         max_trials=30,
         executions_per_trial=1,
-        directory='hyperparam_tuning',
-        project_name='cnn_tuning',
+        directory='hyperparam_tuning_new',
+        project_name='cnn_tuning_new',
     )
     
     tuner.search(
@@ -467,43 +480,9 @@ def evaluate_model(model, X_val, y_val, is_lstm=False):
     print(f'Model saved as {model_name}_cry_detection_model.keras')
 
 
-# # def convert_and_save_tflite_model(model, model_type):
-#     """Convert the Keras model to TFLite format and save it."""
-#     # Create directory for TFLite models
-#     tflite_models_dir = pathlib.Path("tflite_models")
-#     tflite_models_dir.mkdir(exist_ok=True, parents=True)
-    
-#     # Convert to TFLite
-#     converter = tf.lite.TFLiteConverter.from_keras_model(model)
-    
-#     # Allow Select TF Ops for both CNN and LSTM models if necessary
-#     converter.target_spec.supported_ops = [
-#         tf.lite.OpsSet.TFLITE_BUILTINS,
-#         tf.lite.OpsSet.SELECT_TF_OPS
-#     ]
-    
-#     # For LSTM models, disable experimental lowering of tensor list ops
-#     if model_type == 'lstm':
-#         converter._experimental_lower_tensor_list_ops = False
-    
-#     # Convert the model
-#     tflite_model = converter.convert()
-    
-#     # Save the model
-#     tflite_model_file = tflite_models_dir / "cry_detection_model.tflite"
-#     tflite_model_file.write_bytes(tflite_model)
-    
-#     # Apply optimizations and convert again
-#     converter.optimizations = [tf.lite.Optimize.DEFAULT]
-#     tflite_quant_model = converter.convert()
-#     tflite_model_quant_file = tflite_models_dir / "cry_detection_model_quant.tflite"
-#     tflite_model_quant_file.write_bytes(tflite_quant_model)
-    
-#     print("TFLite conversion successful!")
-
 def convert_and_save_tflite_model(model, model_type, sample_audio_files, num_mfcc, max_length, is_lstm=False):
     """
-    Convert the Keras model to TFLite format (both standard and quantized) and save it.
+    Convert the Keras model to a fully quantized TFLite format and save it.
 
     Args:
         model (tf.keras.Model): Trained Keras model to convert.
@@ -525,41 +504,29 @@ def convert_and_save_tflite_model(model, model_type, sample_audio_files, num_mfc
                 mfcc = np.load(file_path)
 
                 # Preprocess to match model input
-                input_data = preprocess_mfcc(mfcc, max_length=499)
+                input_data = preprocess_mfcc(mfcc, max_length=max_length, is_lstm=is_lstm)
 
                 # Add batch dimension
                 input_data = np.expand_dims(input_data, axis=0).astype(np.float32)
-
                 print(f"Representative input shape: {input_data.shape}")
                 yield [input_data]
             except Exception as e:
                 print(f"Error loading file {file_path}: {e}")
 
-    # Convert the model to standard TFLite with TFL3 identifier
+    # Convert the model to fully quantized TFLite
     try:
-        print("Converting to standard TFLite with TFL3 identifier...")
+        print("Converting to fully quantized TFLite model...")
         converter = tf.lite.TFLiteConverter.from_keras_model(model)
-        converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS]  # Ensure TFL3 compatibility
-        if is_lstm:
-            converter._experimental_lower_tensor_list_ops = False  # Ensure LSTM compatibility
-
-        tflite_model = converter.convert()
-        tflite_model_file = tflite_models_dir / f"{model_type}_cry_detection_model.tflite"
-        tflite_model_file.write_bytes(tflite_model)
-        print(f"Standard TFLite model with TFL3 identifier saved to {tflite_model_file}")
-    except Exception as e:
-        print(f"Failed to convert standard TFLite model: {e}")
-        return
-
-    # Convert the model to quantized TFLite with TFL3 identifier
-    try:
-        print("Converting to quantized TFLite with TFL3 identifier...")
         converter.optimizations = [tf.lite.Optimize.DEFAULT]  # Enable optimizations
         converter.representative_dataset = representative_dataset  # Use representative dataset for quantization
+        converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]  # Restrict to int8 ops
+        converter.inference_input_type = tf.int8  # Quantize input tensors to int8
+        converter.inference_output_type = tf.int8  # Quantize output tensors to int8
+
         tflite_quant_model = converter.convert()
-        tflite_model_quant_file = tflite_models_dir / f"{model_type}_cry_detection_model_quant.tflite"
+        tflite_model_quant_file = tflite_models_dir / f"{model_type}_cry_detection_model_quant_shifted.tflite"
         tflite_model_quant_file.write_bytes(tflite_quant_model)
-        print(f"Quantized TFLite model with TFL3 identifier saved to {tflite_model_quant_file}")
+        print(f"Fully quantized TFLite model saved to {tflite_model_quant_file}")
     except Exception as e:
         print(f"Failed to convert quantized TFLite model: {e}")
 
@@ -586,6 +553,16 @@ def predict_tflite(interpreter, input_details, output_details, file_path, num_mf
     else:
         input_data = np.expand_dims(input_data, axis=0).astype(np.float32)  # Shape: (1, time_steps, num_mfcc, 1)
     
+    # Get input quantization parameters
+    input_scale, input_zero_point = input_details[0]['quantization']
+    
+    # Quantize the input data if the model expects INT8 input
+    if input_details[0]['dtype'] == np.int8:
+        input_data = input_data / input_scale + input_zero_point
+        input_data = np.round(input_data).astype(np.int8)
+    else:
+        input_data = input_data.astype(input_details[0]['dtype'])
+    
     # Set the tensor to point to the input data for inference
     interpreter.set_tensor(input_details[0]['index'], input_data)
     
@@ -594,6 +571,11 @@ def predict_tflite(interpreter, input_details, output_details, file_path, num_mf
     
     # Get the output prediction
     output_data = interpreter.get_tensor(output_details[0]['index'])
+    
+    # Dequantize output if necessary
+    output_scale, output_zero_point = output_details[0]['quantization']
+    if output_details[0]['dtype'] == np.int8:
+        output_data = (output_data.astype(np.float32) - output_zero_point) * output_scale
     
     return output_data
 
@@ -608,7 +590,14 @@ def process_folder_tflite(interpreter, input_details, output_details, folder_pat
         if file_name.endswith('.wav'):
             file_path = os.path.join(folder_path, file_name)
             prediction = predict_tflite(interpreter, input_details, output_details, file_path, num_mfcc, max_length, is_lstm)
-            prediction_label = 'Cry' if prediction > 0.5 else 'Not Cry'
+            
+            # Since the output might be quantized, ensure it's converted to float32
+            if isinstance(prediction, np.ndarray) and prediction.dtype != np.float32:
+                prediction = prediction.astype(np.float32)
+            
+            # Assuming binary classification with sigmoid activation
+            prediction_prob = prediction[0][0]
+            prediction_label = 'Cry' if prediction_prob > 0.5 else 'Not Cry'
             results.append((file_name, prediction_label))
             ground_truth = 'Cry' if '_cry.wav' in file_name else 'Not Cry'
 
@@ -625,7 +614,7 @@ def process_folder_tflite(interpreter, input_details, output_details, folder_pat
 def tflite_inference(model_type):
     """Perform inference using the TFLite model."""
     # Initialize the TFLite interpreter
-    interpreter = tf.lite.Interpreter(model_path="tflite_models/cnn_cry_detection_model_quant.tflite")
+    interpreter = tf.lite.Interpreter(model_path=f"tflite_models/{model_type}_cry_detection_model_quant_shifted.tflite")
     interpreter.allocate_tensors()
     
     # Get input and output tensors
@@ -636,7 +625,7 @@ def tflite_inference(model_type):
     is_lstm_model = True if model_type == 'lstm' else False
     
     # Define folder path for test data
-    folder_path = os.path.join(AUDIO_PATH, 'Test_augmented')
+    folder_path = os.path.join(AUDIO_PATH, 'test')
     
     predictions, accuracy = process_folder_tflite(interpreter, input_details, output_details, folder_path, NUM_MFCC, MAX_LENGTH, is_lstm_model)
     
@@ -646,70 +635,6 @@ def tflite_inference(model_type):
     print(f"Prediction Accuracy: {accuracy:.2f}%")
 
 
-# # def main():
-#     """Main function to execute the training and inference pipeline."""
-#     # Load audio file paths
-#     cry_files = load_audio_files(CRY_FOLDER)
-#     notcry_files = load_audio_files(NOTCRY_FOLDER)
-    
-#     # Prepare directories for saving MFCCs
-#     mfcc_save_dir = os.path.join(AUDIO_PATH, 'mfccs')
-#     os.makedirs(mfcc_save_dir, exist_ok=True)
-    
-#     # Process and save MFCCs for cry and notcry files
-#     cry_data_paths, cry_labels = process_and_save_mfcc(cry_files, 'cry', mfcc_save_dir, n_mfcc=NUM_MFCC)
-#     notcry_data_paths, notcry_labels = process_and_save_mfcc(notcry_files, 'notcry', mfcc_save_dir, n_mfcc=NUM_MFCC)
-    
-#     # Combine data paths and labels
-#     data_paths = np.array(cry_data_paths + notcry_data_paths)
-#     labels = np.array(cry_labels + notcry_labels)
-    
-#     # Split data
-#     X_train, X_val, y_train, y_val = train_test_split(
-#         data_paths, labels, test_size=0.2, random_state=42
-#     )
-    
-#     # Initialize data generators
-#     train_generator = OnTheFlyDataGenerator(
-#         X_train,
-#         y_train,
-#         batch_size=BATCH_SIZE,
-#         num_mfcc=NUM_MFCC,
-#         max_length=MAX_LENGTH,
-#         shuffle=True,
-#         augment=True,
-#         is_lstm=(MODEL_TYPE == 'lstm'),
-#     )
-    
-#     val_generator = OnTheFlyDataGenerator(
-#         X_val,
-#         y_val,
-#         batch_size=BATCH_SIZE,
-#         num_mfcc=NUM_MFCC,
-#         max_length=MAX_LENGTH,
-#         shuffle=False,
-#         augment=False,
-#         is_lstm=(MODEL_TYPE == 'lstm'),
-#     )
-    
-#     # Build and train model
-#     if MODEL_TYPE == 'cnn':
-#         # Build and train CNN model
-#         model = build_and_train_cnn_model(train_generator, val_generator)
-#     elif MODEL_TYPE == 'lstm':
-#         # Build and train LSTM model
-#         model = build_and_train_lstm_model(train_generator, val_generator)
-#     else:
-#         raise ValueError("Invalid MODEL_TYPE. Choose 'cnn' or 'lstm'.")
-    
-#     # Evaluate model on validation data
-#     evaluate_model(model, X_val, y_val, is_lstm=(MODEL_TYPE == 'lstm'))
-    
-#     # Convert model to TFLite and save
-#     convert_and_save_tflite_model(model, MODEL_TYPE, )
-    
-#     # Perform inference using TFLite model
-#     tflite_inference(MODEL_TYPE)
 
 def main():
     """Main function to execute the training and inference pipeline."""
@@ -734,46 +659,53 @@ def main():
         data_paths, labels, test_size=0.2, random_state=42
     )
     
-    # # Initialize data generators
-    # train_generator = OnTheFlyDataGenerator(
-    #     X_train,
-    #     y_train,
-    #     batch_size=BATCH_SIZE,
-    #     num_mfcc=NUM_MFCC,
-    #     max_length=MAX_LENGTH,
-    #     shuffle=True,
-    #     augment=True,
-    #     is_lstm=(MODEL_TYPE == 'lstm'),
-    # )
+    # Compute class weights
+    class_weights_array = compute_class_weight(
+        class_weight='balanced', classes=np.unique(y_train), y=y_train
+    )
+    class_weights_dict = dict(zip(np.unique(y_train), class_weights_array))
     
-    # val_generator = OnTheFlyDataGenerator(
-    #     X_val,
-    #     y_val,
-    #     batch_size=BATCH_SIZE,
-    #     num_mfcc=NUM_MFCC,
-    #     max_length=MAX_LENGTH,
-    #     shuffle=False,
-    #     augment=False,
-    #     is_lstm=(MODEL_TYPE == 'lstm'),
-    # )
+    # Initialize data generators with class weights
+    train_generator = OnTheFlyDataGenerator(
+        X_train,
+        y_train,
+        batch_size=BATCH_SIZE,
+        num_mfcc=NUM_MFCC,
+        max_length=MAX_LENGTH,
+        shuffle=True,
+        augment=True,
+        is_lstm=(MODEL_TYPE == 'lstm'),
+        class_weights=class_weights_dict
+    )
     
-    # # Build and train model
-    # if MODEL_TYPE == 'cnn':
-    #     # Build and train CNN model
-    #     model = build_and_train_cnn_model(train_generator, val_generator)
-    # elif MODEL_TYPE == 'lstm':
-    #     # Build and train LSTM model
-    #     model = build_and_train_lstm_model(train_generator, val_generator)
-    # else:
-    #     raise ValueError("Invalid MODEL_TYPE. Choose 'cnn' or 'lstm'.")
+    val_generator = OnTheFlyDataGenerator(
+        X_val,
+        y_val,
+        batch_size=BATCH_SIZE,
+        num_mfcc=NUM_MFCC,
+        max_length=MAX_LENGTH,
+        shuffle=False,
+        augment=False,
+        is_lstm=(MODEL_TYPE == 'lstm'),
+        class_weights=None  # No need for sample weights in validation
+    )
     
-    # # Evaluate model on validation data
-    # evaluate_model(model, X_val, y_val, is_lstm=(MODEL_TYPE == 'lstm'))
+    # Build and train model
+    if MODEL_TYPE == 'cnn':
+        # Build and train CNN model
+        model = build_and_train_cnn_model(train_generator, val_generator)
+    elif MODEL_TYPE == 'lstm':
+        # Build and train LSTM model
+        model = build_and_train_lstm_model(train_generator, val_generator)
+    else:
+        raise ValueError("Invalid MODEL_TYPE. Choose 'cnn' or 'lstm'.")
+    
+    # Evaluate model on validation data
+    evaluate_model(model, X_val, y_val, is_lstm=(MODEL_TYPE == 'lstm'))
     
     # Define sample files for quantization
     # Use a subset of the training files for representative data
     sample_audio_files = X_train[:20]
-    model = tf.keras.models.load_model('cnn_cry_detection_model.keras')
     
     # Convert model to TFLite and save
     convert_and_save_tflite_model(
