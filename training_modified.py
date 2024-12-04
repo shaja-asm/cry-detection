@@ -18,9 +18,9 @@ import pathlib
 
 
 # Constants
-AUDIO_PATH = '/mnt/d/deBarbaroCry/deBarbaroCry/CryCorpusNew'
-CRY_FOLDER = os.path.join(AUDIO_PATH, 'cry')
-NOTCRY_FOLDER = os.path.join(AUDIO_PATH, 'notcry')
+AUDIO_PATH = '/mnt/d/Datasets/CryCorpusNew/'
+CRY_FOLDER = os.path.join(AUDIO_PATH, 'cry_augmented')
+NOTCRY_FOLDER = os.path.join(AUDIO_PATH, 'notcry_augmented')
 NUM_MFCC = 20  # Number of MFCC coefficients to extract
 BATCH_SIZE = 32
 EPOCHS = 50
@@ -625,7 +625,7 @@ def tflite_inference(model_type):
     is_lstm_model = True if model_type == 'lstm' else False
     
     # Define folder path for test data
-    folder_path = os.path.join(AUDIO_PATH, 'test')
+    folder_path = os.path.join(AUDIO_PATH, 'test_augmented')
     
     predictions, accuracy = process_folder_tflite(interpreter, input_details, output_details, folder_path, NUM_MFCC, MAX_LENGTH, is_lstm_model)
     

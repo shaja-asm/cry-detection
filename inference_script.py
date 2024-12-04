@@ -166,13 +166,13 @@ def preprocess_audio(file_path, num_mfcc, max_length, is_lstm):
 def main():
     """Main function to perform inference using the TFLite C API."""
     # Set the audio folder and model type directly in the code
-    audio_folder = '/mnt/d/deBarbaroCry/deBarbaroCry/CryCorpusFinal/cry'
+    audio_folder = '/mnt/d/Datasets/CryCorpusNew/test_augmented'
     model_type = 'cnn'  # Choose 'cnn' or 'lstm'
 
     NUM_MFCC = 20
     MAX_LENGTH = 499
-    TFLITE_MODEL_PATH = '/home/meow/repos/cry-detection/tflite_models/cnn_cry_detection_model_quant_shifted.tflite'
-    TFLITE_C_LIBRARY_PATH = '/home/meow/repos/cry-detection/libtensorflowlite_c_2_14_1_amd64.so'
+    TFLITE_MODEL_PATH = '/home/garfield/cry-detection/tflite_models/cnn_cry_detection_model_quant_shifted.tflite'
+    TFLITE_C_LIBRARY_PATH = '/home/garfield/cry-detection/libtensorflowlite_c_2_14_1_amd64.so'
 
     # Load the TensorFlow Lite C library
     lib = load_tflite_c_library(TFLITE_C_LIBRARY_PATH)
@@ -332,21 +332,21 @@ def main():
             ground_truths.append(ground_truth)
 
             # Print the prediction
-            prediction_label = 'Cry' if prediction > 0.99 else 'Not Cry'
+            prediction_label = 'Cry' if prediction > 0.65 else 'Not Cry'
             print(f"File: {file_name}, Prediction: {prediction_label}, Prediction fraction: {prediction}")
 
             # Move file into 'verified' subfolder if prediction < 0.2
-            if prediction > 0.99:
-                destination_path = os.path.join(verified_folder, file_name)
-                try:
-                    shutil.move(file_path, destination_path)
-                    print(f"Moved file {file_name} to 'verified' folder.")
-                except Exception as e:
-                    print(f"Failed to move file {file_name}: {e}")
+            # if prediction > 0.65:
+            #     destination_path = os.path.join(verified_folder, file_name)
+            #     try:
+            #         shutil.move(file_path, destination_path)
+            #         print(f"Moved file {file_name} to 'verified' folder.")
+            #     except Exception as e:
+            #         print(f"Failed to move file {file_name}: {e}")
                 
 
     # Compute metrics
-    predictions_binary = [1 if p > 0.99 else 0 for p in predictions]
+    predictions_binary = [1 if p > 0.65 else 0 for p in predictions]
 
     accuracy = accuracy_score(ground_truths, predictions_binary)
     f1 = f1_score(ground_truths, predictions_binary)
